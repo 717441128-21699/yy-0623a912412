@@ -5,6 +5,7 @@ import {
   TaskStation,
   CheckItem,
   CheckReport,
+  ExceptionRecord,
 } from '../types';
 
 const dbDir = path.join(__dirname, '..', '..', 'data');
@@ -15,6 +16,7 @@ interface DatabaseData {
   stations: TaskStation[];
   checkItems: CheckItem[];
   reports: CheckReport[];
+  exceptions: ExceptionRecord[];
 }
 
 let db: DatabaseData = {
@@ -22,6 +24,7 @@ let db: DatabaseData = {
   stations: [],
   checkItems: [],
   reports: [],
+  exceptions: [],
 };
 
 let initialized = false;
@@ -36,7 +39,14 @@ function loadFromFile() {
   if (fs.existsSync(dbFile)) {
     try {
       const content = fs.readFileSync(dbFile, 'utf-8');
-      db = JSON.parse(content);
+      const loaded = JSON.parse(content);
+      db = {
+        tasks: loaded.tasks || [],
+        stations: loaded.stations || [],
+        checkItems: loaded.checkItems || [],
+        reports: loaded.reports || [],
+        exceptions: loaded.exceptions || [],
+      };
     } catch (e) {
       console.warn('Failed to load database file, starting with empty data');
     }
@@ -77,6 +87,10 @@ export const dbStore = {
     return db.reports;
   },
 
+  get exceptions(): ExceptionRecord[] {
+    return db.exceptions;
+  },
+
   addTask(task: TemperatureTask): void {
     db.tasks.push(task);
     save();
@@ -94,6 +108,11 @@ export const dbStore = {
 
   addReport(report: CheckReport): void {
     db.reports.push(report);
+    save();
+  },
+
+  addException(exception: ExceptionRecord): void {
+    db.exceptions.push(exception);
     save();
   },
 
@@ -117,6 +136,14 @@ export const dbStore = {
     const idx = db.checkItems.findIndex((i) => i.id === itemId);
     if (idx !== -1) {
       db.checkItems[idx] = { ...db.checkItems[idx], ...updates };
+      save();
+    }
+  },
+
+  updateException(exceptionId: string, updates: Partial<ExceptionRecord>): void {
+    const idx = db.exceptions.findIndex((e) => e.id === exceptionId);
+    if (idx !== -1) {
+      db.exceptions[idx] = { ...db.exceptions[idx], ...updates };
       save();
     }
   },

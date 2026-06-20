@@ -6,6 +6,11 @@ export async function createTask(req: Request, res: Response) {
   const request: CreateTaskRequest = req.body;
   const result = taskService.generateTask(request);
 
+  const stationCheckCount = result.checklist.reduce(
+    (sum, s) => sum + s.station_checks.length,
+    0
+  );
+
   res.status(201).json({
     code: 0,
     message: '任务创建成功',
@@ -25,7 +30,10 @@ export async function createTask(req: Request, res: Response) {
       },
       check_interval_minutes: result.task.check_interval_minutes,
       stations: result.checklist,
+      transit_checks: result.transit_checks,
       total_stations: result.stations.length,
+      total_station_checks: stationCheckCount,
+      total_transit_checks: result.transit_checks.length,
       total_check_items: result.checkItems.length,
     },
   });

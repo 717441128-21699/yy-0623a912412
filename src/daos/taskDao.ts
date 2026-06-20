@@ -6,10 +6,63 @@ import {
   CheckItem,
   CheckReport,
   CreateTaskRequest,
+  ExceptionRecord,
+  ExceptionType,
+  ExceptionStatus,
 } from '../types';
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function generateTransitCheckItems(
+  taskId: string,
+  stations: TaskStation[],
+  intervalMinutes: number,
+  createdAt: string
+): CheckItem[] {
+  const items: CheckItem[] = [];
+  let sortCounter = 100;
+
+  for (let i = 0; i < stations.length - 1; i++) {
+    const fromStation = stations[i];
+    const toStation = stations[i + 1];
+
+    if (!fromStation.planned_arrival_time || !toStation.planned_arrival_time) {
+      continue;
+    }
+
+    const startTime = new Date(fromStation.planned_arrival_time).getTime();
+    const endTime = new Date(toStation.planned_arrival_time).getTime();
+    const intervalMs = intervalMinutes * 60 * 1000;
+
+    let checkTime = startTime + intervalMs;
+    let sequence = 1;
+
+    while (checkTime < endTime) {
+      const itemId = uuidv4();
+      const item: CheckItem = {
+        id: itemId,
+        task_id: taskId,
+        station_id: fromStation.id,
+        check_scope: 'transit',
+        check_type: 'transit_temperature',
+        check_name: `途中温度巡检 #${sequence} (${fromStation.station_name} → ${toStation.station_name})`,
+        required: 1,
+        sort_order: sortCounter++,
+        status: 'pending',
+        due_time: new Date(checkTime).toISOString(),
+        created_at: createdAt,
+      };
+      dbStore.addCheckItem(item);
+      items.push(item);
+
+      checkTime += intervalMs;
+      sequence++;
+    }
+  }
+
+  return items;
 }
 
 export function createTask(request: CreateTaskRequest): {
@@ -59,23 +112,32 @@ export function createTask(request: CreateTaskRequest): {
     stations.push(station);
 
     const itemTemplates = [
-      { type: 'arrival' as const, name: '到站确认', required: 1, order: 1 },
-      { type: 'temperature' as const, name: '温度检测', required: 1, order: 2 },
-      { type: 'photo' as const, name: '货物照片', required: 1, order: 3 },
-      { type: 'departure' as const, name: '离站确认', required: 1, order: 4 },
+      { type: 'arrival' as const, name: '到站确认', required: 1, order: 1, scope: 'station' as const },
+      { type: 'temperature' as const, name: '温度检测', required: 1, order: 2, scope: 'station' as const },
+      { type: 'photo' as const, name: '货物照片', required: 1, order: 3, scope: 'station' as const },
+      { type: 'departure' as const, name: '离站确认', required: 1, order: 4, scope: 'station' as const },
     ];
 
     itemTemplates.forEach((tpl) => {
       const itemId = uuidv4();
+      let dueTime: string | undefined;
+      if (tpl.type === 'arrival' && stationInput.planned_arrival_time) {
+        dueTime = stationInput.planned_arrival_time;
+      } else if (tpl.type !== 'arrival' && stationInput.planned_arrival_time) {
+        const baseTime = new Date(stationInput.planned_arrival_time).getTime();
+        dueTime = new Date(baseTime + tpl.order * 30 * 60 * 1000).toISOString();
+      }
       const item: CheckItem = {
         id: itemId,
         task_id: taskId,
         station_id: stationId,
+        check_scope: tpl.scope,
         check_type: tpl.type,
         check_name: tpl.name,
         required: tpl.required,
         sort_order: tpl.order,
         status: 'pending',
+        due_time: dueTime,
         created_at: createdAt,
       };
       dbStore.addCheckItem(item);
@@ -83,7 +145,14 @@ export function createTask(request: CreateTaskRequest): {
     });
   });
 
-  return { task, stations, checkItems };
+  const transitItems = generateTransitCheckItems(
+    taskId,
+    stations,
+    request.check_interval_minutes,
+    createdAt
+  );
+
+  return { task, stations, checkItems: [...checkItems, ...transitItems] };
 }
 
 export function getTaskById(taskId: string): TemperatureTask | undefined {
@@ -119,16 +188,49 @@ export function getCheckItemsByStationId(stationId: string): CheckItem[] {
 export function getCheckItemsByTaskId(taskId: string): CheckItem[] {
   return dbStore.checkItems
     .filter((item) => item.task_id === taskId)
-    .sort((a, b) => {
-      if (a.station_id === b.station_id) {
-        return a.sort_order - b.sort_order;
-      }
-      return a.station_id.localeCompare(b.station_id);
-    });
+    .sort((a, b) => a.sort_order - b.sort_order);
+}
+
+export function getTransitCheckItemsByTaskId(taskId: string): CheckItem[] {
+  return dbStore.checkItems
+    .filter((item) => item.task_id === taskId && item.check_scope === 'transit')
+    .sort((a, b) => a.sort_order - b.sort_order);
+}
+
+export function getStationCheckItemsByTaskId(taskId: string): CheckItem[] {
+  return dbStore.checkItems
+    .filter((item) => item.task_id === taskId && item.check_scope === 'station')
+    .sort((a, b) => a.sort_order - b.sort_order);
 }
 
 export function getCheckItemById(itemId: string): CheckItem | undefined {
   return dbStore.checkItems.find((item) => item.id === itemId);
+}
+
+export function findNextDueTransitCheckItem(taskId: string): CheckItem | undefined {
+  const pendingTransit = dbStore.checkItems.filter(
+    (item) => item.task_id === taskId && item.check_scope === 'transit' && item.status === 'pending'
+  );
+  return pendingTransit.sort((a, b) => {
+    const ta = a.due_time ? new Date(a.due_time).getTime() : 0;
+    const tb = b.due_time ? new Date(b.due_time).getTime() : 0;
+    return ta - tb;
+  })[0];
+}
+
+export function findPendingStationCheckItem(
+  stationId: string,
+  checkType: string
+): CheckItem | undefined {
+  return dbStore.checkItems
+    .filter(
+      (item) =>
+        item.station_id === stationId &&
+        item.check_type === checkType &&
+        item.check_scope === 'station' &&
+        item.status === 'pending'
+    )
+    .sort((a, b) => a.sort_order - b.sort_order)[0];
 }
 
 export function updateCheckItemStatus(
@@ -210,15 +312,6 @@ export function getReportsByStationId(stationId: string): CheckReport[] {
     .sort((a, b) => new Date(b.report_time).getTime() - new Date(a.report_time).getTime());
 }
 
-export function findPendingCheckItem(
-  stationId: string,
-  checkType: string
-): CheckItem | undefined {
-  return dbStore.checkItems
-    .filter((item) => item.station_id === stationId && item.check_type === checkType && item.status === 'pending')
-    .sort((a, b) => a.sort_order - b.sort_order)[0];
-}
-
 export function getNextStationByTaskId(taskId: string): TaskStation | undefined {
   return dbStore.stations
     .filter((s) => s.task_id === taskId && s.status !== 'completed')
@@ -229,4 +322,68 @@ export function getCurrentStationByTaskId(taskId: string): TaskStation | undefin
   return dbStore.stations
     .filter((s) => s.task_id === taskId && (s.status === 'arrived' || s.status === 'pending'))
     .sort((a, b) => a.station_index - b.station_index)[0];
+}
+
+export function createException(params: {
+  task_id: string;
+  station_id?: string;
+  check_item_id?: string;
+  report_id?: string;
+  exception_type: ExceptionType;
+  description: string;
+  temperature?: number;
+  temperature_min?: number;
+  temperature_max?: number;
+  driver_remark?: string;
+}): ExceptionRecord {
+  const exceptionId = uuidv4();
+  const createdAt = now();
+
+  const record: ExceptionRecord = {
+    id: exceptionId,
+    task_id: params.task_id,
+    station_id: params.station_id,
+    check_item_id: params.check_item_id,
+    report_id: params.report_id,
+    exception_type: params.exception_type,
+    description: params.description,
+    temperature: params.temperature,
+    temperature_min: params.temperature_min,
+    temperature_max: params.temperature_max,
+    driver_remark: params.driver_remark,
+    status: 'pending',
+    created_at: createdAt,
+  };
+
+  dbStore.addException(record);
+  return record;
+}
+
+export function getExceptionById(exceptionId: string): ExceptionRecord | undefined {
+  return dbStore.exceptions.find((e) => e.id === exceptionId);
+}
+
+export function getExceptionsByTaskId(taskId: string): ExceptionRecord[] {
+  return dbStore.exceptions
+    .filter((e) => e.task_id === taskId)
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+}
+
+export function handleException(
+  exceptionId: string,
+  handler: string,
+  handleRemark: string,
+  status: ExceptionStatus
+): ExceptionRecord | undefined {
+  const exception = getExceptionById(exceptionId);
+  if (!exception) return undefined;
+
+  dbStore.updateException(exceptionId, {
+    status,
+    handler,
+    handle_remark: handleRemark,
+    handled_at: now(),
+  });
+
+  return getExceptionById(exceptionId);
 }

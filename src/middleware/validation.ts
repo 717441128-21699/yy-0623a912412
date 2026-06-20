@@ -27,7 +27,15 @@ const submitReportSchema = z.object({
   photo_url: z.string().optional(),
   remark: z.string().optional(),
   report_time: z.string().optional(),
-  check_type: z.enum(['arrival', 'temperature', 'photo', 'departure']).optional(),
+  check_type: z.enum(['arrival', 'temperature', 'photo', 'departure', 'transit_temperature']).optional(),
+  check_item_id: z.string().optional(),
+});
+
+const handleExceptionSchema = z.object({
+  exception_id: z.string().min(1, '异常ID不能为空'),
+  handler: z.string().min(1, '处理人不能为空'),
+  handle_remark: z.string().min(1, '处理备注不能为空'),
+  status: z.enum(['pending', 'handling', 'closed']),
 });
 
 export function validateCreateTask(req: Request, res: Response, next: NextFunction) {
@@ -52,6 +60,25 @@ export function validateCreateTask(req: Request, res: Response, next: NextFuncti
 export function validateSubmitReport(req: Request, res: Response, next: NextFunction) {
   try {
     submitReportSchema.parse(req.body);
+    next();
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        error: '参数校验失败',
+        details: error.errors.map((e) => ({
+          field: e.path.join('.'),
+          message: e.message,
+        })),
+      });
+    } else {
+      next(error);
+    }
+  }
+}
+
+export function validateHandleException(req: Request, res: Response, next: NextFunction) {
+  try {
+    handleExceptionSchema.parse(req.body);
     next();
   } catch (error) {
     if (error instanceof z.ZodError) {
