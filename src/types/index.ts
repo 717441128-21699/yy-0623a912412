@@ -81,6 +81,10 @@ export interface ExceptionRecord {
   handler?: string;
   handle_remark?: string;
   handled_at?: string;
+  recover_temperature?: number;
+  recover_remark?: string;
+  recover_report_id?: string;
+  recover_time?: string;
   created_at: string;
 }
 
@@ -115,6 +119,7 @@ export interface SubmitReportRequest {
 }
 
 export interface BatchTemperaturePoint {
+  point_id?: string;
   temperature: number;
   report_time: string;
   remark?: string;
@@ -123,6 +128,7 @@ export interface BatchTemperaturePoint {
 export interface BatchSubmitRequest {
   task_id: string;
   report_source: ReportSource;
+  batch_id?: string;
   points: BatchTemperaturePoint[];
 }
 
@@ -131,4 +137,6 @@ export interface HandleExceptionRequest {
   handler: string;
   handle_remark: string;
   status: ExceptionStatus;
+  recover_temperature?: number;
+  recover_remark?: string;
 }

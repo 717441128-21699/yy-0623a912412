@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import * as queryService from '../services/queryService';
-import { FilterStatus, DashboardQuery } from '../services/queryService';
+import { FilterStatus, DashboardQuery, ExceptionQueueQuery, ExceptionPriority } from '../services/queryService';
 
 const VALID_FILTERS: FilterStatus[] = ['all', 'pending', 'exception', 'overdue', 'completed', 'closed'];
 
@@ -70,6 +70,45 @@ export async function dashboardQuery(req: Request, res: Response) {
       total: result.length,
       query: params,
       tasks: result,
+    },
+  });
+}
+
+export async function exceptionQueue(req: Request, res: Response) {
+  const params: ExceptionQueueQuery = {};
+
+  if (req.query.status) params.status = req.query.status as any;
+  if (req.query.plate_no) params.plate_no = req.query.plate_no as string;
+  if (req.query.driver_id) params.driver_id = req.query.driver_id as string;
+  if (req.query.goods_temp_zone) params.goods_temp_zone = req.query.goods_temp_zone as string;
+  if (req.query.exception_type) params.exception_type = req.query.exception_type as string;
+  if (req.query.min_priority) params.min_priority = req.query.min_priority as ExceptionPriority;
+
+  if (req.query.pending_minutes_min) {
+    const v = parseInt(req.query.pending_minutes_min as string, 10);
+    if (!isNaN(v)) params.pending_minutes_min = v;
+  }
+  if (req.query.pending_minutes_max) {
+    const v = parseInt(req.query.pending_minutes_max as string, 10);
+    if (!isNaN(v)) params.pending_minutes_max = v;
+  }
+
+  const result = queryService.queryExceptionQueue(params);
+
+  const counts = {
+    total: result.length,
+    critical: result.filter((r) => r.priority === 'critical').length,
+    high: result.filter((r) => r.priority === 'high').length,
+    medium: result.filter((r) => r.priority === 'medium').length,
+    low: result.filter((r) => r.priority === 'low').length,
+  };
+
+  res.json({
+    code: 0,
+    data: {
+      query: params,
+      counts,
+      items: result,
     },
   });
 }

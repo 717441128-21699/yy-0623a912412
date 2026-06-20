@@ -36,13 +36,17 @@ const handleExceptionSchema = z.object({
   handler: z.string().min(1, '处理人不能为空'),
   handle_remark: z.string().min(1, '处理备注不能为空'),
   status: z.enum(['pending', 'handling', 'closed']),
+  recover_temperature: z.number().optional(),
+  recover_remark: z.string().optional(),
 });
 
 const batchSubmitSchema = z.object({
   task_id: z.string().min(1, '任务ID不能为空'),
   report_source: z.enum(['driver_app', 'onboard_device']),
+  batch_id: z.string().optional(),
   points: z.array(
     z.object({
+      point_id: z.string().optional(),
       temperature: z.number(),
       report_time: z.string().min(1, '上报时间不能为空'),
       remark: z.string().optional(),

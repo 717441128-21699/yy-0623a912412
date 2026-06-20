@@ -373,17 +373,27 @@ export function handleException(
   exceptionId: string,
   handler: string,
   handleRemark: string,
-  status: ExceptionStatus
+  status: ExceptionStatus,
+  recoverTemperature?: number,
+  recoverRemark?: string
 ): ExceptionRecord | undefined {
   const exception = getExceptionById(exceptionId);
   if (!exception) return undefined;
 
-  dbStore.updateException(exceptionId, {
+  const updates: Partial<ExceptionRecord> = {
     status,
     handler,
     handle_remark: handleRemark,
     handled_at: now(),
-  });
+  };
+
+  if (status === 'closed') {
+    updates.recover_temperature = recoverTemperature;
+    updates.recover_remark = recoverRemark;
+    updates.recover_time = now();
+  }
+
+  dbStore.updateException(exceptionId, updates);
 
   return getExceptionById(exceptionId);
 }

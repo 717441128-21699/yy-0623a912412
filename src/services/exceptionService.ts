@@ -33,7 +33,9 @@ export function handleException(request: HandleExceptionRequest): ExceptionRecor
     request.exception_id,
     request.handler,
     request.handle_remark,
-    request.status
+    request.status,
+    request.recover_temperature,
+    request.recover_remark
   );
 
   if (!exception) return null;

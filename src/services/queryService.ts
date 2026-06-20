@@ -63,6 +63,10 @@ export interface ExceptionSummary {
   handler?: string;
   handle_remark?: string;
   handled_at?: string;
+  recover_temperature?: number;
+  recover_remark?: string;
+  recover_time?: string;
+  has_recover_evidence: boolean;
   created_at: string;
 }
 
@@ -228,10 +232,13 @@ function buildTimeline(
     const linkedStation = stations.find((s) => s.id === exc.station_id);
 
     if (exc.status === 'closed') {
+      const hasRecoverEvidence = !!exc.recover_temperature || !!exc.recover_remark;
       nodes.push({
         id: `exc_closed_${exc.id}`,
         type: 'exception_closed',
-        title: `异常已闭环：${exc.exception_type === 'temperature_violation' ? '温度越界' : '异常事件'}`,
+        title: hasRecoverEvidence
+          ? `异常已闭环：${exc.exception_type === 'temperature_violation' ? '温度越界（有恢复证据）' : '异常事件（有恢复证据）'}`
+          : `异常已闭环：${exc.exception_type === 'temperature_violation' ? '温度越界（仅备注，无恢复数据）' : '异常事件（仅备注，无恢复数据）'}`,
         status: 'completed',
         planned_time: exc.created_at,
         actual_time: exc.handled_at || exc.created_at,
@@ -245,7 +252,10 @@ function buildTimeline(
           handle_remark: exc.handle_remark,
           handled_at: exc.handled_at,
           resolution: exc.handle_remark,
-          recover_time: exc.handled_at,
+          recover_time: exc.recover_time || exc.handled_at,
+          recover_temperature: exc.recover_temperature,
+          recover_remark: exc.recover_remark,
+          has_recover_evidence: hasRecoverEvidence,
           linked_check_item_id: exc.check_item_id,
           linked_report_id: exc.report_id,
           station_name: linkedStation?.station_name,
@@ -470,6 +480,10 @@ function buildTaskStatusDetail(
     handler: e.handler,
     handle_remark: e.handle_remark,
     handled_at: e.handled_at,
+    recover_temperature: e.recover_temperature,
+    recover_remark: e.recover_remark,
+    recover_time: e.recover_time,
+    has_recover_evidence: e.status === 'closed' && (!!e.recover_temperature || !!e.recover_remark),
     created_at: e.created_at,
   }));
 
@@ -650,5 +664,197 @@ export function queryDashboard(params: DashboardQuery): DashboardTaskItem[] {
     if (a.overdue_count > 0 && b.overdue_count === 0) return -1;
     if (a.overdue_count === 0 && b.overdue_count > 0) return 1;
     return (a.next_due_time || '').localeCompare(b.next_due_time || '');
+  });
+}
+
+export type ExceptionPriority = 'critical' | 'high' | 'medium' | 'low';
+
+export interface ExceptionQueueItem {
+  exception_id: string;
+  exception_type: string;
+  description: string;
+  status: 'pending' | 'handling';
+  temperature?: number;
+  temperature_min?: number;
+  temperature_max?: number;
+  violation_offset?: number;
+  latest_violation_temp?: number;
+  driver_remark?: string;
+  created_at: string;
+  pending_minutes: number;
+  handler?: string;
+  handle_remark?: string;
+  task_id: string;
+  task_no: string;
+  waybill_no: string;
+  plate_no: string;
+  driver_id: string;
+  driver_name: string;
+  goods_temp_zone: string;
+  current_location?: string;
+  priority: ExceptionPriority;
+  priority_score: number;
+  suggested_action: string;
+}
+
+export interface ExceptionQueueQuery {
+  status?: 'all' | 'pending' | 'handling';
+  plate_no?: string;
+  driver_id?: string;
+  goods_temp_zone?: string;
+  exception_type?: string;
+  pending_minutes_min?: number;
+  pending_minutes_max?: number;
+  min_priority?: ExceptionPriority;
+}
+
+const PRIORITY_ORDER: Record<ExceptionPriority, number> = {
+  critical: 4, high: 3, medium: 2, low: 1,
+};
+
+function computeExceptionPriority(
+  exc: ExceptionRecord,
+  task: TemperatureTask,
+  nowTs: number
+): { priority: ExceptionPriority; score: number; suggested: string } {
+  const pendingMs = nowTs - new Date(exc.created_at).getTime();
+  const pendingHours = pendingMs / (60 * 60 * 1000);
+
+  let score = 0;
+  let offset = 0;
+
+  if (exc.exception_type === 'temperature_violation' && exc.temperature !== undefined) {
+    const min = exc.temperature_min ?? task.temp_min;
+    const max = exc.temperature_max ?? task.temp_max;
+    const range = Math.max(1, max - min);
+
+    if (exc.temperature < min) {
+      offset = (min - exc.temperature) / range;
+    } else if (exc.temperature > max) {
+      offset = (exc.temperature - max) / range;
+    }
+    score += offset * 100;
+  }
+
+  if (exc.exception_type === 'temperature_violation') score += 30;
+  else if (exc.exception_type === 'missing_item') score += 20;
+  else if (exc.exception_type === 'overdue') score += 15;
+  else score += 10;
+
+  if (pendingHours > 4) score += 30;
+  else if (pendingHours > 2) score += 20;
+  else if (pendingHours > 1) score += 10;
+
+  const criticalZones = ['冷冻', '深冻', '-18', '-22'];
+  if (criticalZones.some((z) => task.goods_temp_zone.includes(z))) score += 15;
+
+  let priority: ExceptionPriority = 'low';
+  if (score >= 90) priority = 'critical';
+  else if (score >= 60) priority = 'high';
+  else if (score >= 30) priority = 'medium';
+
+  let suggested = '';
+  if (exc.exception_type === 'temperature_violation') {
+    if (priority === 'critical') suggested = '立即联系司机停车检查制冷机组，必要时就近转运';
+    else if (priority === 'high') suggested = '10分钟内联系司机确认制冷状态，1小时内回查温度';
+    else if (priority === 'medium') suggested = '半小时内跟进，提醒司机留意温度变化';
+    else suggested = '常规跟进，下次巡检时确认温度已恢复';
+  } else {
+    if (priority === 'critical') suggested = '立即处置';
+    else if (priority === 'high') suggested = '优先处理';
+    else if (priority === 'medium') suggested = '尽快跟进';
+    else suggested = '常规跟进';
+  }
+
+  return { priority, score: Math.round(score), suggested };
+}
+
+export function queryExceptionQueue(params: ExceptionQueueQuery): ExceptionQueueItem[] {
+  let exceptions = dbStore.exceptions.filter((e) => e.status !== 'closed');
+
+  if (params.status && params.status !== 'all') {
+    exceptions = exceptions.filter((e) => e.status === params.status);
+  }
+  if (params.exception_type) {
+    exceptions = exceptions.filter((e) => e.exception_type === params.exception_type);
+  }
+
+  const nowTs = Date.now();
+  const items: ExceptionQueueItem[] = [];
+
+  for (const exc of exceptions) {
+    const task = dbStore.tasks.find((t) => t.id === exc.task_id);
+    if (!task) continue;
+
+    if (params.plate_no && !task.plate_no.includes(params.plate_no)) continue;
+    if (params.driver_id && task.driver_id !== params.driver_id) continue;
+    if (params.goods_temp_zone && task.goods_temp_zone !== params.goods_temp_zone) continue;
+
+    const pendingMinutes = Math.max(0, Math.round((nowTs - new Date(exc.created_at).getTime()) / (60 * 1000)));
+    if (params.pending_minutes_min !== undefined && pendingMinutes < params.pending_minutes_min) continue;
+    if (params.pending_minutes_max !== undefined && pendingMinutes > params.pending_minutes_max) continue;
+
+    const { priority, score, suggested } = computeExceptionPriority(exc, task, nowTs);
+
+    if (params.min_priority && PRIORITY_ORDER[priority] < PRIORITY_ORDER[params.min_priority]) continue;
+
+    let latestViolationTemp = exc.temperature;
+    let violationOffset: number | undefined;
+    if (exc.exception_type === 'temperature_violation' && exc.temperature !== undefined) {
+      const min = exc.temperature_min ?? task.temp_min;
+      const max = exc.temperature_max ?? task.temp_max;
+      if (exc.temperature < min) violationOffset = +(min - exc.temperature).toFixed(1);
+      else if (exc.temperature > max) violationOffset = +(exc.temperature - max).toFixed(1);
+
+      const laterViolations = dbStore.reports.filter(
+        (r) => r.task_id === exc.task_id && r.is_exception === 1 && r.exception_type === 'temperature_violation'
+      );
+      if (laterViolations.length > 0) {
+        latestViolationTemp = laterViolations.sort(
+          (a, b) => new Date(b.report_time).getTime() - new Date(a.report_time).getTime()
+        )[0].temperature;
+      }
+    }
+
+    const stations = dbStore.stations.filter((s) => s.task_id === task.id);
+    const currentStation = stations
+      .filter((s) => s.status === 'arrived')
+      .sort((a, b) => a.station_index - b.station_index)[0]
+      || stations
+      .filter((s) => s.status === 'pending')
+      .sort((a, b) => a.station_index - b.station_index)[0];
+
+    items.push({
+      exception_id: exc.id,
+      exception_type: exc.exception_type,
+      description: exc.description,
+      status: exc.status as 'pending' | 'handling',
+      temperature: exc.temperature,
+      temperature_min: exc.temperature_min ?? task.temp_min,
+      temperature_max: exc.temperature_max ?? task.temp_max,
+      violation_offset: violationOffset,
+      latest_violation_temp: latestViolationTemp,
+      driver_remark: exc.driver_remark,
+      created_at: exc.created_at,
+      pending_minutes: pendingMinutes,
+      handler: exc.handler,
+      handle_remark: exc.handle_remark,
+      task_id: task.id,
+      task_no: task.task_no,
+      waybill_no: task.waybill_no,
+      plate_no: task.plate_no,
+      driver_id: task.driver_id,
+      driver_name: task.driver_name,
+      goods_temp_zone: task.goods_temp_zone,
+      current_location: currentStation?.station_name,
+      priority,
+      priority_score: score,
+      suggested_action: suggested,
+    });
+  }
+
+  return items.sort((a, b) => {
+    if (b.priority_score !== a.priority_score) return b.priority_score - a.priority_score;
+    return b.pending_minutes - a.pending_minutes;
   });
 }
