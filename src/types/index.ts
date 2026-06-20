@@ -114,6 +114,18 @@ export interface SubmitReportRequest {
   check_item_id?: string;
 }
 
+export interface BatchTemperaturePoint {
+  temperature: number;
+  report_time: string;
+  remark?: string;
+}
+
+export interface BatchSubmitRequest {
+  task_id: string;
+  report_source: ReportSource;
+  points: BatchTemperaturePoint[];
+}
+
 export interface HandleExceptionRequest {
   exception_id: string;
   handler: string;

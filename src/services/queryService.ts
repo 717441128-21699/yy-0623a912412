@@ -7,6 +7,9 @@ import {
   ExceptionRecord,
 } from '../types';
 
+export type TimelineNodeType = 'station_arrival' | 'station_check' | 'transit_check' | 'exception' | 'station_departure';
+export type FilterStatus = 'all' | 'pending' | 'exception' | 'overdue' | 'completed' | 'closed';
+
 export interface StationStatusDetail {
   station: TaskStation;
   station_checks: CheckItem[];
@@ -78,6 +81,23 @@ export interface TaskSummary {
   exception_handling: number;
   exception_closed: number;
   has_open_exception: boolean;
+  current_location?: string;
+  next_due_time?: string;
+}
+
+export interface TimelineNode {
+  id: string;
+  type: TimelineNodeType;
+  title: string;
+  status: 'pending' | 'completed' | 'exception' | 'overdue';
+  planned_time?: string;
+  actual_time?: string;
+  station_index?: number;
+  station_name?: string;
+  check_item_id?: string;
+  exception_id?: string;
+  details?: any;
+  sort_key: string;
 }
 
 export interface TaskStatusDetail {
@@ -87,34 +107,161 @@ export interface TaskStatusDetail {
   overdue_nodes: OverdueNode[];
   temperature_violations: TemperatureViolation[];
   exceptions: ExceptionSummary[];
+  timeline: TimelineNode[];
   summary: TaskSummary;
 }
 
-function isOverdue(item: CheckItem | TaskStation): boolean {
-  const due = (item as any).due_time || (item as any).planned_arrival_time;
-  if (!due) return false;
-  return new Date().getTime() > new Date(due).getTime();
+export function isCheckOverdue(item: CheckItem): boolean {
+  if (!item.due_time || item.status !== 'pending') return false;
+  return Date.now() > new Date(item.due_time).getTime();
 }
 
-function isCheckOverdue(item: CheckItem): boolean {
-  if (item.due_time && item.status === 'pending') {
-    return new Date().getTime() > new Date(item.due_time).getTime();
+function isStationOverdue(station: TaskStation): boolean {
+  if (!station.planned_arrival_time || station.status === 'completed') return false;
+  return Date.now() > new Date(station.planned_arrival_time).getTime();
+}
+
+function buildTimeline(
+  task: TemperatureTask,
+  stations: TaskStation[],
+  stationItems: CheckItem[],
+  transitItems: CheckItem[],
+  allReports: CheckReport[],
+  exceptions: ExceptionRecord[],
+  filter?: FilterStatus
+): TimelineNode[] {
+  const nodes: TimelineNode[] = [];
+
+  stations.forEach((station) => {
+    if (station.planned_arrival_time) {
+      nodes.push({
+        id: `arrival_${station.id}`,
+        type: 'station_arrival',
+        title: `到达 ${station.station_name}`,
+        status: station.status === 'arrived' || station.status === 'completed' ? 'completed' :
+                isStationOverdue(station) ? 'overdue' : 'pending',
+        planned_time: station.planned_arrival_time,
+        actual_time: station.actual_arrival_time,
+        station_index: station.station_index,
+        station_name: station.station_name,
+        sort_key: station.planned_arrival_time,
+      });
+    }
+
+    const items = stationItems.filter((i) => i.station_id === station.id);
+    items.forEach((item) => {
+      const report = allReports.find((r) => r.check_item_id === item.id);
+      let status: TimelineNode['status'] = 'pending';
+      if (item.status === 'completed') status = 'completed';
+      else if (item.status === 'exception') status = 'exception';
+      else if (item.status === 'pending' && isCheckOverdue(item)) status = 'overdue';
+
+      const node: TimelineNode = {
+        id: `check_${item.id}`,
+        type: item.check_type === 'departure' ? 'station_departure' : 'station_check',
+        title: item.check_name,
+        status,
+        planned_time: item.due_time,
+        actual_time: report?.report_time,
+        station_index: station.station_index,
+        station_name: station.station_name,
+        check_item_id: item.id,
+        details: {
+          check_type: item.check_type,
+          temperature: report?.temperature,
+          photo_url: report?.photo_url,
+        },
+        sort_key: item.due_time || station.planned_arrival_time || '',
+      };
+      nodes.push(node);
+    });
+  });
+
+  transitItems.forEach((item) => {
+    const report = allReports.find((r) => r.check_item_id === item.id);
+    let status: TimelineNode['status'] = 'pending';
+    if (item.status === 'completed') status = 'completed';
+    else if (item.status === 'exception') status = 'exception';
+    else if (item.status === 'pending' && isCheckOverdue(item)) status = 'overdue';
+
+    nodes.push({
+      id: `transit_${item.id}`,
+      type: 'transit_check',
+      title: item.check_name,
+      status,
+      planned_time: item.due_time,
+      actual_time: report?.report_time,
+      check_item_id: item.id,
+      details: {
+        temperature: report?.temperature,
+      },
+      sort_key: item.due_time || '',
+    });
+  });
+
+  exceptions.forEach((exc) => {
+    nodes.push({
+      id: `exc_${exc.id}`,
+      type: 'exception',
+      title: `${exc.exception_type === 'temperature_violation' ? '温度越界' : '异常事件'}`,
+      status: exc.status === 'closed' ? 'completed' : 'exception',
+      planned_time: exc.created_at,
+      actual_time: exc.created_at,
+      exception_id: exc.id,
+      details: {
+        exception_type: exc.exception_type,
+        description: exc.description,
+        temperature: exc.temperature,
+        driver_remark: exc.driver_remark,
+        handler: exc.handler,
+        handle_remark: exc.handle_remark,
+        handled_at: exc.handled_at,
+      },
+      sort_key: exc.created_at,
+    });
+  });
+
+  nodes.sort((a, b) => {
+    const ta = a.planned_time ? new Date(a.planned_time).getTime() : 0;
+    const tb = b.planned_time ? new Date(b.planned_time).getTime() : 0;
+    return ta - tb;
+  });
+
+  if (filter && filter !== 'all') {
+    return nodes.filter((n) => {
+      if (filter === 'pending') return n.status === 'pending';
+      if (filter === 'exception') return n.status === 'exception';
+      if (filter === 'overdue') return n.status === 'overdue';
+      if (filter === 'completed') return n.status === 'completed';
+      if (filter === 'closed') return n.status === 'completed' && n.type === 'exception';
+      return true;
+    });
   }
-  return false;
+
+  return nodes;
 }
 
-export function getTaskStatusByWaybill(waybillNo: string): TaskStatusDetail[] {
+export function getTaskStatusByWaybill(
+  waybillNo: string,
+  filter?: FilterStatus
+): TaskStatusDetail[] {
   const tasks = taskDao.getTasksByWaybill(waybillNo);
-  return tasks.map((task) => buildTaskStatusDetail(task.id));
+  return tasks.map((task) => buildTaskStatusDetail(task.id, filter));
 }
 
-export function getTaskStatusById(taskId: string): TaskStatusDetail | null {
+export function getTaskStatusById(
+  taskId: string,
+  filter?: FilterStatus
+): TaskStatusDetail | null {
   const task = taskDao.getTaskById(taskId);
   if (!task) return null;
-  return buildTaskStatusDetail(taskId);
+  return buildTaskStatusDetail(taskId, filter);
 }
 
-function buildTaskStatusDetail(taskId: string): TaskStatusDetail {
+function buildTaskStatusDetail(
+  taskId: string,
+  filter?: FilterStatus
+): TaskStatusDetail {
   const task = taskDao.getTaskById(taskId)!;
   const stations = taskDao.getStationsByTaskId(taskId);
   const stationItems = taskDao.getStationCheckItemsByTaskId(taskId);
@@ -136,16 +283,11 @@ function buildTaskStatusDetail(taskId: string): TaskStatusDetail {
         is_violation: r.is_exception === 1 && r.exception_type === 'temperature_violation',
       }));
 
-    let stationOverdue = false;
-    if (station.planned_arrival_time && station.status !== 'completed') {
-      stationOverdue = isOverdue(station);
-    }
-
     return {
       station,
       station_checks: checks,
       reports,
-      is_overdue: stationOverdue,
+      is_overdue: isStationOverdue(station),
       completed_count: completed.length,
       total_required: required.length,
       temperature_reports: tempReports,
@@ -165,14 +307,14 @@ function buildTaskStatusDetail(taskId: string): TaskStatusDetail {
 
   stationDetails.forEach((sd) => {
     sd.station_checks.forEach((check) => {
-      if (check.due_time && check.status === 'pending') {
+      if (check.status === 'pending' && isCheckOverdue(check)) {
         overdueNodes.push({
           check_item_id: check.id,
           check_type: check.check_type,
           check_scope: check.check_scope,
           check_name: check.check_name,
           station_name: sd.station.station_name,
-          due_time: check.due_time,
+          due_time: check.due_time!,
         });
       }
     });
@@ -224,8 +366,21 @@ function buildTaskStatusDetail(taskId: string): TaskStatusDetail {
     created_at: e.created_at,
   }));
 
+  const timeline = buildTimeline(
+    task, stations, stationItems, transitItems, allReports, exceptions, filter
+  );
+
   const totalStationChecks = stationItems.filter((i) => i.required === 1);
   const totalTransitChecks = transitItems.filter((i) => i.required === 1);
+
+  const pendingOverdue = [...stationItems, ...transitItems]
+    .filter((i) => i.required === 1 && i.status === 'pending' && isCheckOverdue(i));
+
+  const currentStation = stationDetails.find((s) => s.station.status === 'arrived')
+    || stationDetails.find((s) => s.station.status === 'pending');
+  const nextDueItem = [...totalStationChecks, ...totalTransitChecks]
+    .filter((i) => i.status === 'pending' && i.due_time)
+    .sort((a, b) => new Date(a.due_time!).getTime() - new Date(b.due_time!).getTime())[0];
 
   const summary: TaskSummary = {
     total_stations: stations.length,
@@ -240,13 +395,15 @@ function buildTaskStatusDetail(taskId: string): TaskStatusDetail {
     completed_transit_checks: totalTransitChecks.filter(
       (i) => i.status === 'completed' || i.status === 'exception'
     ).length,
-    overdue_count: overdueNodes.length,
+    overdue_count: pendingOverdue.length,
     temperature_violation_count: tempViolations.length,
     exception_total: exceptions.length,
     exception_pending: exceptions.filter((e) => e.status === 'pending').length,
     exception_handling: exceptions.filter((e) => e.status === 'handling').length,
     exception_closed: exceptions.filter((e) => e.status === 'closed').length,
     has_open_exception: exceptions.some((e) => e.status !== 'closed'),
+    current_location: currentStation?.station.station_name,
+    next_due_time: nextDueItem?.due_time,
   };
 
   return {
@@ -256,6 +413,7 @@ function buildTaskStatusDetail(taskId: string): TaskStatusDetail {
     overdue_nodes: overdueNodes,
     temperature_violations: tempViolations,
     exceptions: exceptionSummary,
+    timeline,
     summary,
   };
 }

@@ -1,5 +1,5 @@
 import * as taskDao from '../daos/taskDao';
-import { SubmitReportRequest, CheckReport, CheckItem, TaskStation } from '../types';
+import { SubmitReportRequest, CheckReport, CheckItem, TaskStation, CheckType } from '../types';
 
 export type ReportAction = 'continue' | 'handover' | 'exception';
 
@@ -47,38 +47,52 @@ export interface SubmitReportResponse {
   exception_id?: string;
 }
 
+export interface FieldRule {
+  check_type: CheckType;
+  required_fields: string[];
+}
+
+const FIELD_VALIDATION_RULES: FieldRule[] = [
+  { check_type: 'temperature', required_fields: ['temperature'] },
+  { check_type: 'transit_temperature', required_fields: ['temperature'] },
+  { check_type: 'photo', required_fields: ['photo_url'] },
+  { check_type: 'arrival', required_fields: [] },
+  { check_type: 'departure', required_fields: [] },
+];
+
+function getValidationRule(checkType: CheckType): FieldRule | undefined {
+  return FIELD_VALIDATION_RULES.find((r) => r.check_type === checkType);
+}
+
 function validateRequiredFields(
-  request: SubmitReportRequest
+  request: SubmitReportRequest,
+  checkType?: CheckType
 ): MissingField[] {
   const missing: MissingField[] = [];
-  const ct = request.check_type;
+  const ct = checkType || request.check_type;
+  if (!ct) return missing;
 
-  if (ct === 'temperature' || ct === 'transit_temperature') {
-    if (request.temperature === undefined || request.temperature === null) {
-      missing.push({
-        field: 'temperature',
-        message: '温度检测必须上报温度值',
-      });
+  const rule = getValidationRule(ct);
+  if (!rule) return missing;
+
+  rule.required_fields.forEach((field) => {
+    if (field === 'temperature') {
+      if ((request as any)[field] === undefined || (request as any)[field] === null) {
+        missing.push({ field, message: ct.includes('temperature') ? '温度检测必须上报温度值' : `${field} 不能为空` });
+      }
+    } else if (field === 'photo_url') {
+      const val = (request as any)[field];
+      if (!val || (typeof val === 'string' && val.trim().length === 0)) {
+        missing.push({ field, message: '照片上传必须提供照片地址' });
+      }
     }
-  }
-
-  if (ct === 'photo') {
-    if (!request.photo_url || request.photo_url.trim().length === 0) {
-      missing.push({
-        field: 'photo_url',
-        message: '照片上传必须提供照片地址',
-      });
-    }
-  }
-
-  if (ct === 'arrival' || ct === 'departure') {
-  }
+  });
 
   return missing;
 }
 
 function isCheckItemOverdue(item: CheckItem): boolean {
-  if (!item.due_time) return false;
+  if (!item.due_time || item.status !== 'pending') return false;
   return new Date().getTime() > new Date(item.due_time).getTime();
 }
 
@@ -117,13 +131,46 @@ function collectPendingItems(
   return missing;
 }
 
+function updateTaskStatusAfterChange(taskId: string, isException: boolean) {
+  const task = taskDao.getTaskById(taskId);
+  if (!task) return;
+
+  if (task.status === 'pending') {
+    taskDao.updateTaskStatus(taskId, 'in_progress');
+  } else if (isException && task.status !== 'exception') {
+    taskDao.updateTaskStatus(taskId, 'exception');
+  } else if (!isException && task.status === 'exception') {
+    const pendingExceptions = taskDao
+      .getExceptionsByTaskId(taskId)
+      .filter((e) => e.status !== 'closed');
+    if (pendingExceptions.length === 0) {
+      taskDao.updateTaskStatus(taskId, 'in_progress');
+    }
+  }
+}
+
 export function submitReport(request: SubmitReportRequest): SubmitReportResponse {
   const task = taskDao.getTaskById(request.task_id);
   if (!task) {
     throw new Error('任务不存在');
   }
 
-  const missingFields = validateRequiredFields(request);
+  let effectiveCheckType = request.check_type;
+  let checkItem: CheckItem | undefined;
+
+  if (request.check_item_id) {
+    checkItem = taskDao.getCheckItemById(request.check_item_id);
+    if (!checkItem || checkItem.task_id !== request.task_id) {
+      return {
+        success: false,
+        action: 'continue',
+        message: '指定的检查项不存在',
+      };
+    }
+    effectiveCheckType = checkItem.check_type;
+  }
+
+  const missingFields = validateRequiredFields(request, effectiveCheckType);
   if (missingFields.length > 0) {
     return {
       success: false,
@@ -136,24 +183,42 @@ export function submitReport(request: SubmitReportRequest): SubmitReportResponse
   let stationId = request.station_id;
   let station: TaskStation | undefined;
 
-  if (stationId) {
+  if (checkItem) {
+    stationId = checkItem.station_id;
+    station = taskDao.getStationById(stationId);
+  } else if (stationId) {
     station = taskDao.getStationById(stationId);
     if (!station || station.task_id !== request.task_id) {
       throw new Error('站点不存在或不属于该任务');
     }
   } else {
-    station = taskDao.getCurrentStationByTaskId(request.task_id);
-    if (!station) {
-      throw new Error('没有待处理的站点');
+    if (effectiveCheckType === 'transit_temperature') {
+      const nextTransit = taskDao.findNextDueTransitCheckItem(request.task_id);
+      if (nextTransit) {
+        checkItem = nextTransit;
+        stationId = nextTransit.station_id;
+        station = taskDao.getStationById(stationId);
+      } else {
+        station = taskDao.getCurrentStationByTaskId(request.task_id);
+        if (!station) {
+          throw new Error('没有待处理的站点');
+        }
+        stationId = station.id;
+      }
+    } else {
+      station = taskDao.getCurrentStationByTaskId(request.task_id);
+      if (!station) {
+        throw new Error('没有待处理的站点');
+      }
+      stationId = station.id;
     }
-    stationId = station.id;
   }
 
   const reportTime = request.report_time || new Date().toISOString();
   let isException = false;
   let exceptionType: string | undefined;
 
-  const ct = request.check_type;
+  const ct = effectiveCheckType;
   if ((ct === 'temperature' || ct === 'transit_temperature') && request.temperature !== undefined) {
     if (request.temperature < task.temp_min || request.temperature > task.temp_max) {
       isException = true;
@@ -168,22 +233,11 @@ export function submitReport(request: SubmitReportRequest): SubmitReportResponse
     }
   }
 
-  let checkItem: CheckItem | undefined;
-
-  if (request.check_item_id) {
-    checkItem = taskDao.getCheckItemById(request.check_item_id);
-    if (!checkItem || checkItem.task_id !== request.task_id) {
-      return {
-        success: false,
-        action: 'continue',
-        message: '指定的检查项不存在',
-      };
-    }
-  } else if (request.check_type) {
+  if (!checkItem && request.check_type && effectiveCheckType) {
     if (request.check_type === 'transit_temperature') {
       checkItem = taskDao.findNextDueTransitCheckItem(request.task_id);
-    } else {
-      checkItem = taskDao.findPendingStationCheckItem(stationId, request.check_type);
+    } else if (effectiveCheckType && !checkItem) {
+      checkItem = taskDao.findPendingStationCheckItem(stationId, effectiveCheckType);
     }
   }
 
@@ -195,7 +249,7 @@ export function submitReport(request: SubmitReportRequest): SubmitReportResponse
     );
   }
 
-  if (request.check_type === 'arrival' && station.status === 'pending') {
+  if (effectiveCheckType === 'arrival' && station && station.status === 'pending') {
     taskDao.updateStationStatus(stationId, 'arrived', reportTime);
     station.status = 'arrived';
   }
@@ -233,18 +287,7 @@ export function submitReport(request: SubmitReportRequest): SubmitReportResponse
     exceptionId = excRecord.id;
   }
 
-  if (task.status === 'pending') {
-    taskDao.updateTaskStatus(task.id, 'in_progress');
-  } else if (isException && task.status !== 'exception') {
-    taskDao.updateTaskStatus(task.id, 'exception');
-  } else if (!isException && task.status === 'exception') {
-    const pendingExceptions = taskDao
-      .getExceptionsByTaskId(task.id)
-      .filter((e) => e.status !== 'closed');
-    if (pendingExceptions.length === 0) {
-      taskDao.updateTaskStatus(task.id, 'in_progress');
-    }
-  }
+  updateTaskStatusAfterChange(task.id, isException);
 
   const allStationItems = taskDao.getStationCheckItemsByTaskId(task.id);
   const allTransitItems = taskDao.getTransitCheckItemsByTaskId(task.id);
@@ -257,7 +300,7 @@ export function submitReport(request: SubmitReportRequest): SubmitReportResponse
 
   let action: ReportAction;
   let message: string;
-  let missingItems = collectPendingItems(stationCheckItems, []);
+  let missingItems: SubmitReportResponse['missing_items'] = [];
 
   if (isException) {
     action = 'exception';
@@ -267,10 +310,11 @@ export function submitReport(request: SubmitReportRequest): SubmitReportResponse
     } else if (exceptionType === 'driver_remark') {
       message = `司机已上报异常备注，已触发异常跟进（异常ID: ${exceptionId}）`;
     }
-  } else if (pendingStationItems.length > 0 || pendingTransitItems.length > 0) {
+    missingItems = collectPendingItems(stationCheckItems, []);
+  } else if (pendingStationItems.length > 0) {
     action = 'continue';
     const totalPending = pendingStationItems.length + pendingTransitItems.length;
-    message = `还有 ${totalPending} 项待完成（站点:${pendingStationItems.length}项 / 途中巡检:${pendingTransitItems.length}项），请继续补录`;
+    message = `还有 ${totalPending} 项待完成（本站点:${pendingStationItems.length}项 / 途中巡检:${pendingTransitItems.length}项），请继续补录`;
     missingItems = collectPendingItems(stationCheckItems, pendingTransitItems.slice(0, 3));
   } else {
     action = 'handover';
@@ -282,6 +326,7 @@ export function submitReport(request: SubmitReportRequest): SubmitReportResponse
     const remainingTransit = allTransitItems.filter(
       (item) => item.required === 1 && item.status === 'pending'
     );
+
     if (completedStations.length === allStations.length && remainingTransit.length === 0) {
       const hasOpenException = taskDao
         .getExceptionsByTaskId(task.id)

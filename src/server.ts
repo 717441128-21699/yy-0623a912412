@@ -5,7 +5,7 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════════════════════════════╗
-║  冷链司机温控任务后端服务 v2.0                           ║
+║  冷链司机温控任务后端服务 v2.1                           ║
 ║  Cold Chain Temperature Task Service                    ║
 ╠══════════════════════════════════════════════════════════╣
 ║  服务地址: http://localhost:${PORT}                         ║
@@ -13,8 +13,12 @@ app.listen(PORT, () => {
 ╠══════════════════════════════════════════════════════════╣
 ║  [1] 任务生成    POST   /api/v1/tasks                    ║
 ║  [2] 过程接收    POST   /api/v1/reports                  ║
+║      批量上报    POST   /api/v1/reports/batch            ║
 ║  [3] 状态查询    GET    /api/v1/query/tasks/:id/status   ║
+║                   ?filter=pending|exception|overdue      ║
+║                   |completed|closed                      ║
 ║      状态查询    GET    /api/v1/query/waybill/:no/status ║
+║                   ?filter=...                            ║
 ║  [4] 异常列表    GET    /api/v1/exceptions/task/:task_id ║
 ║      异常详情    GET    /api/v1/exceptions/:id           ║
 ║      异常处理    POST   /api/v1/exceptions/handle        ║

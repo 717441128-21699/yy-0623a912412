@@ -38,6 +38,18 @@ const handleExceptionSchema = z.object({
   status: z.enum(['pending', 'handling', 'closed']),
 });
 
+const batchSubmitSchema = z.object({
+  task_id: z.string().min(1, '任务ID不能为空'),
+  report_source: z.enum(['driver_app', 'onboard_device']),
+  points: z.array(
+    z.object({
+      temperature: z.number(),
+      report_time: z.string().min(1, '上报时间不能为空'),
+      remark: z.string().optional(),
+    })
+  ).min(1, '至少需要一条温度数据'),
+});
+
 export function validateCreateTask(req: Request, res: Response, next: NextFunction) {
   try {
     createTaskSchema.parse(req.body);
@@ -79,6 +91,25 @@ export function validateSubmitReport(req: Request, res: Response, next: NextFunc
 export function validateHandleException(req: Request, res: Response, next: NextFunction) {
   try {
     handleExceptionSchema.parse(req.body);
+    next();
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        error: '参数校验失败',
+        details: error.errors.map((e) => ({
+          field: e.path.join('.'),
+          message: e.message,
+        })),
+      });
+    } else {
+      next(error);
+    }
+  }
+}
+
+export function validateBatchReport(req: Request, res: Response, next: NextFunction) {
+  try {
+    batchSubmitSchema.parse(req.body);
     next();
   } catch (error) {
     if (error instanceof z.ZodError) {
