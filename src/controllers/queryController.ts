@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import * as queryService from '../services/queryService';
-import { FilterStatus } from '../services/queryService';
+import { FilterStatus, DashboardQuery } from '../services/queryService';
 
 const VALID_FILTERS: FilterStatus[] = ['all', 'pending', 'exception', 'overdue', 'completed', 'closed'];
 
@@ -48,6 +48,28 @@ export async function getTaskStatusById(req: Request, res: Response) {
       filter_applied: filter || 'all',
       available_filters: VALID_FILTERS,
       ...result,
+    },
+  });
+}
+
+export async function dashboardQuery(req: Request, res: Response) {
+  const params: DashboardQuery = {};
+
+  if (req.query.plate_no) params.plate_no = req.query.plate_no as string;
+  if (req.query.driver_id) params.driver_id = req.query.driver_id as string;
+  if (req.query.goods_temp_zone) params.goods_temp_zone = req.query.goods_temp_zone as string;
+  if (req.query.exception_status) params.exception_status = req.query.exception_status as any;
+  if (req.query.planned_arrival_from) params.planned_arrival_from = req.query.planned_arrival_from as string;
+  if (req.query.planned_arrival_to) params.planned_arrival_to = req.query.planned_arrival_to as string;
+
+  const result = queryService.queryDashboard(params);
+
+  res.json({
+    code: 0,
+    data: {
+      total: result.length,
+      query: params,
+      tasks: result,
     },
   });
 }

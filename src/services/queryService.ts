@@ -1,4 +1,5 @@
 import * as taskDao from '../daos/taskDao';
+import { dbStore } from '../db/database';
 import {
   TemperatureTask,
   TaskStation,
@@ -7,7 +8,7 @@ import {
   ExceptionRecord,
 } from '../types';
 
-export type TimelineNodeType = 'station_arrival' | 'station_check' | 'transit_check' | 'exception' | 'station_departure';
+export type TimelineNodeType = 'station_arrival' | 'station_check' | 'transit_check' | 'exception' | 'station_departure' | 'exception_closed';
 export type FilterStatus = 'all' | 'pending' | 'exception' | 'overdue' | 'completed' | 'closed';
 
 export interface StationStatusDetail {
@@ -97,6 +98,8 @@ export interface TimelineNode {
   check_item_id?: string;
   exception_id?: string;
   details?: any;
+  linked_check_item_id?: string;
+  linked_report_id?: string;
   sort_key: string;
 }
 
@@ -156,6 +159,8 @@ function buildTimeline(
       else if (item.status === 'exception') status = 'exception';
       else if (item.status === 'pending' && isCheckOverdue(item)) status = 'overdue';
 
+      const linkedExc = exceptions.find((e) => e.check_item_id === item.id);
+
       const node: TimelineNode = {
         id: `check_${item.id}`,
         type: item.check_type === 'departure' ? 'station_departure' : 'station_check',
@@ -166,6 +171,7 @@ function buildTimeline(
         station_index: station.station_index,
         station_name: station.station_name,
         check_item_id: item.id,
+        linked_report_id: report?.id,
         details: {
           check_type: item.check_type,
           temperature: report?.temperature,
@@ -173,6 +179,13 @@ function buildTimeline(
         },
         sort_key: item.due_time || station.planned_arrival_time || '',
       };
+
+      if (linkedExc) {
+        node.linked_check_item_id = item.id;
+        node.details.linked_exception_id = linkedExc.id;
+        node.details.linked_exception_status = linkedExc.status;
+      }
+
       nodes.push(node);
     });
   });
@@ -184,7 +197,9 @@ function buildTimeline(
     else if (item.status === 'exception') status = 'exception';
     else if (item.status === 'pending' && isCheckOverdue(item)) status = 'overdue';
 
-    nodes.push({
+    const linkedExc = exceptions.find((e) => e.check_item_id === item.id);
+
+    const node: TimelineNode = {
       id: `transit_${item.id}`,
       type: 'transit_check',
       title: item.check_name,
@@ -192,33 +207,87 @@ function buildTimeline(
       planned_time: item.due_time,
       actual_time: report?.report_time,
       check_item_id: item.id,
+      linked_report_id: report?.id,
       details: {
         temperature: report?.temperature,
       },
       sort_key: item.due_time || '',
-    });
+    };
+
+    if (linkedExc) {
+      node.linked_check_item_id = item.id;
+      node.details.linked_exception_id = linkedExc.id;
+      node.details.linked_exception_status = linkedExc.status;
+    }
+
+    nodes.push(node);
   });
 
   exceptions.forEach((exc) => {
-    nodes.push({
-      id: `exc_${exc.id}`,
-      type: 'exception',
-      title: `${exc.exception_type === 'temperature_violation' ? '温度越界' : '异常事件'}`,
-      status: exc.status === 'closed' ? 'completed' : 'exception',
-      planned_time: exc.created_at,
-      actual_time: exc.created_at,
-      exception_id: exc.id,
-      details: {
-        exception_type: exc.exception_type,
-        description: exc.description,
-        temperature: exc.temperature,
-        driver_remark: exc.driver_remark,
-        handler: exc.handler,
-        handle_remark: exc.handle_remark,
-        handled_at: exc.handled_at,
-      },
-      sort_key: exc.created_at,
-    });
+    const linkedReport = allReports.find((r) => r.id === exc.report_id);
+    const linkedStation = stations.find((s) => s.id === exc.station_id);
+
+    if (exc.status === 'closed') {
+      nodes.push({
+        id: `exc_closed_${exc.id}`,
+        type: 'exception_closed',
+        title: `异常已闭环：${exc.exception_type === 'temperature_violation' ? '温度越界' : '异常事件'}`,
+        status: 'completed',
+        planned_time: exc.created_at,
+        actual_time: exc.handled_at || exc.created_at,
+        exception_id: exc.id,
+        details: {
+          exception_type: exc.exception_type,
+          description: exc.description,
+          temperature: exc.temperature,
+          driver_remark: exc.driver_remark,
+          handler: exc.handler,
+          handle_remark: exc.handle_remark,
+          handled_at: exc.handled_at,
+          resolution: exc.handle_remark,
+          recover_time: exc.handled_at,
+          linked_check_item_id: exc.check_item_id,
+          linked_report_id: exc.report_id,
+          station_name: linkedStation?.station_name,
+          linked_report_temperature: linkedReport?.temperature,
+          linked_report_time: linkedReport?.report_time,
+        },
+        linked_check_item_id: exc.check_item_id,
+        linked_report_id: exc.report_id,
+        sort_key: exc.handled_at || exc.created_at,
+      });
+    } else {
+      const excTitle = exc.status === 'handling'
+        ? `异常处理中：${exc.exception_type === 'temperature_violation' ? '温度越界' : '异常事件'}`
+        : `异常待处理：${exc.exception_type === 'temperature_violation' ? '温度越界' : '异常事件'}`;
+
+      nodes.push({
+        id: `exc_${exc.id}`,
+        type: 'exception',
+        title: excTitle,
+        status: 'exception',
+        planned_time: exc.created_at,
+        actual_time: exc.created_at,
+        exception_id: exc.id,
+        details: {
+          exception_type: exc.exception_type,
+          description: exc.description,
+          temperature: exc.temperature,
+          driver_remark: exc.driver_remark,
+          handler: exc.handler,
+          handle_remark: exc.handle_remark,
+          handled_at: exc.handled_at,
+          linked_check_item_id: exc.check_item_id,
+          linked_report_id: exc.report_id,
+          station_name: linkedStation?.station_name,
+          linked_report_temperature: linkedReport?.temperature,
+          linked_report_time: linkedReport?.report_time,
+        },
+        linked_check_item_id: exc.check_item_id,
+        linked_report_id: exc.report_id,
+        sort_key: exc.created_at,
+      });
+    }
   });
 
   nodes.sort((a, b) => {
@@ -228,12 +297,50 @@ function buildTimeline(
   });
 
   if (filter && filter !== 'all') {
+    if (filter === 'exception') {
+      const openExceptionIds = exceptions
+        .filter((e) => e.status !== 'closed')
+        .map((e) => e.id);
+      const openExcCheckItemIds = exceptions
+        .filter((e) => e.status !== 'closed' && e.check_item_id)
+        .map((e) => e.check_item_id!);
+
+      return nodes.filter((n) => {
+        if (n.type === 'exception' && n.status === 'exception') return true;
+        if ((n.type === 'station_check' || n.type === 'transit_check') &&
+            n.status === 'exception' &&
+            openExcCheckItemIds.includes(n.check_item_id || '')) return true;
+        return false;
+      });
+    }
+
+    if (filter === 'closed') {
+      const closedExceptionIds = exceptions
+        .filter((e) => e.status === 'closed')
+        .map((e) => e.id);
+      const closedExcCheckItemIds = exceptions
+        .filter((e) => e.status === 'closed' && e.check_item_id)
+        .map((e) => e.check_item_id!);
+      const closedExcReportIds = exceptions
+        .filter((e) => e.status === 'closed' && e.report_id)
+        .map((e) => e.report_id!);
+
+      return nodes.filter((n) => {
+        if (n.type === 'exception_closed') return true;
+        if ((n.type === 'station_check' || n.type === 'transit_check') &&
+            closedExcCheckItemIds.includes(n.check_item_id || '')) return true;
+        if (n.type === 'station_arrival' || n.type === 'station_departure') {
+          const station = stations.find((s) => s.id === n.id.replace('arrival_', '').replace('departure_', ''));
+          return false;
+        }
+        return false;
+      });
+    }
+
     return nodes.filter((n) => {
       if (filter === 'pending') return n.status === 'pending';
-      if (filter === 'exception') return n.status === 'exception';
       if (filter === 'overdue') return n.status === 'overdue';
-      if (filter === 'completed') return n.status === 'completed';
-      if (filter === 'closed') return n.status === 'completed' && n.type === 'exception';
+      if (filter === 'completed') return n.status === 'completed' && n.type !== 'exception';
       return true;
     });
   }
@@ -416,4 +523,132 @@ function buildTaskStatusDetail(
     timeline,
     summary,
   };
+}
+
+export interface DashboardTaskItem {
+  task_id: string;
+  task_no: string;
+  waybill_no: string;
+  plate_no: string;
+  driver_id: string;
+  driver_name: string;
+  goods_temp_zone: string;
+  temp_min: number;
+  temp_max: number;
+  task_status: string;
+  current_location?: string;
+  next_due_time?: string;
+  next_pending_item?: string;
+  overdue_count: number;
+  open_exception_count: number;
+  completed_stations: number;
+  total_stations: number;
+  next_planned_arrival?: string;
+}
+
+export interface DashboardQuery {
+  plate_no?: string;
+  driver_id?: string;
+  goods_temp_zone?: string;
+  exception_status?: 'all' | 'open' | 'handling' | 'closed' | 'none';
+  planned_arrival_from?: string;
+  planned_arrival_to?: string;
+}
+
+export function queryDashboard(params: DashboardQuery): DashboardTaskItem[] {
+  let tasks = dbStore.tasks;
+
+  if (params.plate_no) {
+    tasks = tasks.filter((t) => t.plate_no.includes(params.plate_no!));
+  }
+  if (params.driver_id) {
+    tasks = tasks.filter((t) => t.driver_id === params.driver_id);
+  }
+  if (params.goods_temp_zone) {
+    tasks = tasks.filter((t) => t.goods_temp_zone === params.goods_temp_zone);
+  }
+
+  if (params.exception_status && params.exception_status !== 'all') {
+    tasks = tasks.filter((t) => {
+      const excs = dbStore.exceptions.filter((e) => e.task_id === t.id);
+      const openCount = excs.filter((e) => e.status !== 'closed').length;
+      const handlingCount = excs.filter((e) => e.status === 'handling').length;
+      const closedCount = excs.filter((e) => e.status === 'closed').length;
+
+      if (params.exception_status === 'open') return openCount > 0;
+      if (params.exception_status === 'handling') return handlingCount > 0;
+      if (params.exception_status === 'closed') return closedCount > 0 && openCount === 0;
+      if (params.exception_status === 'none') return excs.length === 0;
+      return true;
+    });
+  }
+
+  if (params.planned_arrival_from || params.planned_arrival_to) {
+    tasks = tasks.filter((t) => {
+      const stationList = dbStore.stations.filter((s) => s.task_id === t.id);
+      const nextStation = stationList
+        .filter((s) => s.status !== 'completed' && s.planned_arrival_time)
+        .sort((a, b) => new Date(a.planned_arrival_time!).getTime() - new Date(b.planned_arrival_time!).getTime())[0];
+      if (!nextStation?.planned_arrival_time) return false;
+
+      const arrivalTime = new Date(nextStation.planned_arrival_time).getTime();
+      if (params.planned_arrival_from && arrivalTime < new Date(params.planned_arrival_from).getTime()) return false;
+      if (params.planned_arrival_to && arrivalTime > new Date(params.planned_arrival_to).getTime()) return false;
+      return true;
+    });
+  }
+
+  return tasks.map((t) => {
+    const stationList = dbStore.stations.filter((s) => s.task_id === t.id);
+    const sItems = dbStore.checkItems.filter((i) => i.task_id === t.id && i.check_scope === 'station' && i.required === 1);
+    const tItems = dbStore.checkItems.filter((i) => i.task_id === t.id && i.check_scope === 'transit' && i.required === 1);
+    const excs = dbStore.exceptions.filter((e) => e.task_id === t.id);
+
+    const currentStation = stationList
+      .filter((s) => s.status === 'arrived')
+      .sort((a, b) => a.station_index - b.station_index)[0]
+      || stationList
+      .filter((s) => s.status === 'pending')
+      .sort((a, b) => a.station_index - b.station_index)[0];
+
+    const nextStation = stationList
+      .filter((s) => s.status !== 'completed' && s.planned_arrival_time)
+      .sort((a, b) => new Date(a.planned_arrival_time!).getTime() - new Date(b.planned_arrival_time!).getTime())[0];
+
+    const allPending = [...sItems, ...tItems]
+      .filter((i) => i.status === 'pending' && i.due_time)
+      .sort((a, b) => new Date(a.due_time!).getTime() - new Date(b.due_time!).getTime());
+
+    const overdueCount = [...sItems, ...tItems]
+      .filter((i) => i.status === 'pending' && isCheckOverdue(i)).length;
+
+    const openExceptionCount = excs.filter((e) => e.status !== 'closed').length;
+
+    return {
+      task_id: t.id,
+      task_no: t.task_no,
+      waybill_no: t.waybill_no,
+      plate_no: t.plate_no,
+      driver_id: t.driver_id,
+      driver_name: t.driver_name,
+      goods_temp_zone: t.goods_temp_zone,
+      temp_min: t.temp_min,
+      temp_max: t.temp_max,
+      task_status: t.status,
+      current_location: currentStation?.station_name,
+      next_due_time: allPending[0]?.due_time,
+      next_pending_item: allPending[0]?.check_name,
+      overdue_count: overdueCount,
+      open_exception_count: openExceptionCount,
+      completed_stations: stationList.filter((s) => s.status === 'completed').length,
+      total_stations: stationList.length,
+      next_planned_arrival: nextStation?.planned_arrival_time,
+    };
+  }).sort((a, b) => {
+    if (a.open_exception_count > 0 && b.open_exception_count === 0) return -1;
+    if (a.open_exception_count === 0 && b.open_exception_count > 0) return 1;
+    if (a.overdue_count > 0 && b.overdue_count === 0) return -1;
+    if (a.overdue_count === 0 && b.overdue_count > 0) return 1;
+    return (a.next_due_time || '').localeCompare(b.next_due_time || '');
+  });
 }

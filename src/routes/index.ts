@@ -26,6 +26,7 @@ router.post('/reports/batch', validateBatchReport, batchController.submitBatchRe
 
 router.get('/query/tasks/:id/status', queryController.getTaskStatusById);
 router.get('/query/waybill/:waybill_no/status', queryController.getTaskStatusByWaybill);
+router.get('/query/dashboard', queryController.dashboardQuery);
 
 router.get('/exceptions/task/:task_id', exceptionController.getTaskExceptions);
 router.get('/exceptions/:id', exceptionController.getExceptionDetail);
